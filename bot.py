@@ -3,7 +3,9 @@ import datetime
 import logging
 from dotenv import load_dotenv
 from telegram import Update, Bot
-from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackContext
+from telegram.ext import (
+    Application, MessageHandler, filters, CommandHandler, CallbackContext, ConversationHandler
+)
 from yadisk import YaDisk
 
 # Загружаем переменные из .env
@@ -20,48 +22,77 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 y = YaDisk(token=YANDEX_DISK_TOKEN)
 
+# Состояния для хранения данных в ConversationHandler
+WAITING_FOR_FILENAME = 1
+user_files = {}  # Словарь для хранения фото, ожидающих названия
+
+
 async def handle_image(update: Update, context: CallbackContext):
-    try:
-        file = await context.bot.get_file(update.message.photo[-1].file_id)
-        date_folder = datetime.datetime.now().strftime("%Y-%m-%d")
-        yandex_folder = f"disk:/найдено на мх/{date_folder}"
-        local_folder = f"images/{date_folder}"
-        os.makedirs(local_folder, exist_ok=True)
+    """Обрабатывает изображение и запрашивает у пользователя имя файла"""
+    file = await context.bot.get_file(update.message.photo[-1].file_id)
+    user_files[update.message.chat_id] = file
+    await update.message.reply_text("📂 Введите название файла для сохранения:")
+    return WAITING_FOR_FILENAME
 
-        # Проверяем, существует ли папка на Яндекс.Диске
-        if not y.is_dir(yandex_folder):
-            y.mkdir(yandex_folder)
 
-        file_path = f"{local_folder}/{file.file_id}.jpg"
-        await file.download_to_drive(file_path)
-
-        y.upload(file_path, f"{yandex_folder}/{file.file_id}.jpg")
-        await update.message.reply_text("✅ Изображение успешно сохранено в Яндекс.Диск.")
-        os.remove(file_path)
-
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке файла: {e}")
-        await update.message.reply_text(f"⚠ Ошибка при загрузке: {e}")
-
-async def clear_chat(update: Update, context: CallbackContext):
+async def save_image(update: Update, context: CallbackContext):
+    """Сохраняет изображение с пользовательским названием"""
     chat_id = update.message.chat_id
-    message_id = update.message.message_id
+    if chat_id not in user_files:
+        await update.message.reply_text("⚠ Ошибка: нет загруженного изображения.")
+        return ConversationHandler.END
 
-    for i in range(10):  # Удаляем последние 10 сообщений
-        try:
-            await context.bot.delete_message(chat_id, message_id - i)
-        except Exception:
-            pass
+    file = user_files.pop(chat_id)
+    filename = update.message.text.strip() + ".jpg"
 
-    await update.message.reply_text("✅ Чат очищен!", quote=False)
+    # Создание папки с датой
+    date_folder = datetime.datetime.now().strftime("%Y-%m-%d")
+    yandex_folder = f"disk:/найдено на мх/{date_folder}"
+    local_folder = f"images/{date_folder}"
+    os.makedirs(local_folder, exist_ok=True)
+
+    # Проверяем, существует ли папка на Яндекс.Диске
+    if not y.is_dir(yandex_folder):
+        y.mkdir(yandex_folder)
+
+    # Формируем полный путь
+    file_path = f"{local_folder}/{filename}"
+
+    # Скачиваем файл
+    await file.download_to_drive(file_path)
+
+    # Загружаем на Яндекс.Диск
+    y.upload(file_path, f"{yandex_folder}/{filename}")
+
+    await update.message.reply_text(f"✅ Изображение сохранено как **{filename}** в папку `{date_folder}`.")
+
+    # Удаляем локальный файл
+    os.remove(file_path)
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: CallbackContext):
+    """Отмена операции"""
+    await update.message.reply_text("❌ Операция отменена.")
+    return ConversationHandler.END
+
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("clear", clear_chat))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+
+    # Обработчик загрузки фото с вводом имени файла
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.PHOTO, handle_image)],
+        states={WAITING_FOR_FILENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_image)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("clear", cancel))
 
     logger.info("🚀 Бот запущен и работает!")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
