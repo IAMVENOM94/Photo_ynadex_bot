@@ -1,0 +1,37 @@
+name: Check and deploy Serverless
+on:
+  push:
+    branches: [main, v2-serverless]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: photo-yandex-deploy
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm test
+      - run: find tgcloud scripts -type f \( -name '*.js' -o -name '*.mjs' \) -exec node --check {} \;
+  deploy:
+    needs: check
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      TGCLOUD_TOKEN: ${{ secrets.TGCLOUD_TOKEN }}
+      BOT_CONFIG_JSON: ${{ secrets.BOT_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/configure.mjs
+      - run: npm install -g @tgcloud/cli@0.2.0
+      - run: tgcloud push
+      - run: tgcloud migrate --safe
+      - run: tgcloud webhook sync
